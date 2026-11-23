@@ -1,0 +1,20 @@
+diff --git a/cerf-qt/socket_menu.cpp b/cerf-qt/socket_menu.cpp
+index ea9c566..174caac 100644
+--- a/cerf-qt/socket_menu.cpp
++++ b/cerf-qt/socket_menu.cpp
+@@ -90,6 +90,15 @@ std::vector<MenuItem> SocketMenu::Entries(cerfcore::MachineSocket& socket) {
+     }
+     for (const cerfcore::InsertableType& type : types) {
+         std::vector<MenuItem> commands = Commands(socket, type);
++        if (IsForward(type.id)) {
++            // Surface the named-pipe serial entries at the top level of the Insert menu.
++            std::vector<MenuItem> rest;
++            for (MenuItem& item : commands) {
++                if (item.label.rfind("Named pipe", 0) == 0) out.push_back(std::move(item));
++                else rest.push_back(std::move(item));
++            }
++            commands = std::move(rest);
++        }
+         const bool            plain    = type.commands.size() == 1 && type.commands.front().id == "insert" &&
+                                          type.commands.front().arguments.empty();
+         std::vector<MenuItem> hinted;

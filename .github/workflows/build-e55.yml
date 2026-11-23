@@ -44,6 +44,9 @@ jobs:
       - name: Apply the named-pipe patch to libCerfCore
         run: git -C libCerfCore apply --verbose --ignore-whitespace ../e55/patches/libCerfCore-named-pipe.patch
 
+      - name: Apply the menu patch to the CERF frontend
+        run: git apply --verbose --ignore-whitespace e55/patches/cerf-menu-hoist-pipes.patch
+
       - name: Skip the CE guest apps (they need a private toolchain); keep all devices
         run: python e55/tools/trim_e55.py .
 

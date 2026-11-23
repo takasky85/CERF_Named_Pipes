@@ -86,3 +86,5 @@ for "connect", and you no longer need to eject/re-insert after a guest reboot.
 ## Update
 
 The workflow now builds **all** CERF devices (E-55, EM-500, E-700, iPAQ H3600, Jornada 720, ...) because that was as easy as trimming. `tools/trim_e55.py --e55-only` restores the E-55-only device list.
+
+The two named-pipe entries are now directly in the COM socket's Insert menu (`patches/cerf-menu-hoist-pipes.patch`, applied to the cerf frontend), not under Serial Port Forwarder.
