@@ -7,6 +7,11 @@ on:
   push:
     branches: ["main"]
   workflow_dispatch:
+    inputs:
+      dev:
+        description: "Dev-mode build (all log categories in cerf.log)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -111,7 +116,7 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: python build.py --config Release --mode production --unstable
+        run: python build.py --config Release ${{ inputs.dev && '--mode dev' || '--mode production --unstable' }}
 
       - uses: ./.github/actions/compiler-cache
         if: ${{ !cancelled() }}
