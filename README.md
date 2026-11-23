@@ -88,3 +88,10 @@ for "connect", and you no longer need to eject/re-insert after a guest reboot.
 The workflow now builds **all** CERF devices (E-55, EM-500, E-700, iPAQ H3600, Jornada 720, ...) because that was as easy as trimming. `tools/trim_e55.py --e55-only` restores the E-55-only device list.
 
 The two named-pipe entries are now directly in the COM socket's Insert menu (`patches/cerf-menu-hoist-pipes.patch`, applied to the cerf frontend), not under Serial Port Forwarder.
+
+## EM-500 / E-700 (experimental)
+
+Added `casio_jx670_serial_wiring.cpp` (in the libCerfCore patch), which attaches the VR4122 SIU to the serial forwarder like the E-55/Z50.
+The ROMs list "COM1 serial cable" (`Drivers\BuiltIn\Serial`, `Serial.dll`), but `Serial.dll` appears to drive the *companion-chip* 16550
+(the one CERF models as `CasioJx670Modem`), whose interrupt path is not modeled (CERF currently aborts if it asserts INTR). So this wiring may
+expose a COM socket that the guest never uses. Unverified.

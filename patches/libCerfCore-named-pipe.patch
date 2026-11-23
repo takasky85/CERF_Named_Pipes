@@ -1,3 +1,49 @@
+diff --git a/src/boards/casio_jx670/casio_jx670_serial_wiring.cpp b/src/boards/casio_jx670/casio_jx670_serial_wiring.cpp
+new file mode 100644
+index 0000000..d3af909
+--- /dev/null
++++ b/src/boards/casio_jx670/casio_jx670_serial_wiring.cpp
+@@ -0,0 +1,40 @@
++#include "../../socs/vr41xx/vr41xx_giu.h"
++#include "../../socs/vr41xx/vr41xx_serial_wiring.h"
++
++#include <cerfcore/boards/board_context.h>
++#include <cerfcore/core/cerf_emulator.h>
++#include "casio_jx670_family_id.h"
++
++namespace cerfcore {
++
++namespace {
++
++constexpr char kSerialPortId[]    = "serial_port";
++constexpr char kSerialPortLabel[] = "COM1";
++
++/* EM-500 / E-700 (VR4122): the ROM registers "COM1 serial cable" (Drivers\BuiltIn\Serial, Serial.dll) next
++   to the companion-chip modem. Wire the SoC's SIU to the host serial forwarder like the other VR41xx
++   boards. The cradle transceiver supply is assumed always on and carrier detect is the shared DCD GPIO;
++   both are guesses taken from the Z50 wiring, not yet confirmed against this ROM. */
++class CasioJx670SerialWiring : public Vr41xxSerialWiring {
++public:
++    using Vr41xxSerialWiring::Vr41xxSerialWiring;
++
++    bool ShouldRegister() override {
++        return emu_.Get<BoardContext>().GetBoardFamilyId() == BoardFamilyId::CasioJx670;
++    }
++
++    std::optional<Vr41xxSerialModem> ForSiu() const override {
++        return Vr41xxSerialModem({kSerialPortId, kSerialPortLabel}, Vr41xxGiu::kDcdPin);
++    }
++
++    bool SupplyOn() override { return true; }
++
++    void RegisterSupplyListener(std::function<void()>) override {}
++};
++
++}
++
++REGISTER_SERVICE_AS(CasioJx670SerialWiring, Vr41xxSerialWiring);
++
++}
 diff --git a/src/peripherals/serial/serial_forward_commands.cpp b/src/peripherals/serial/serial_forward_commands.cpp
 index c034082..a6a9148 100644
 --- a/src/peripherals/serial/serial_forward_commands.cpp
