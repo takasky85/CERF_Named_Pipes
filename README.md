@@ -43,8 +43,8 @@ use that name in 86Box or set `CERF_SERIAL_PIPES` for others.
 - Pipe mode skips DCB/comm timeouts. Byte stream, overlapped I/O, same threading as COM mode.
 - Modem lines are synthesized: CTS+DSR+DCD asserted while a peer is connected, all low when not.
   DTR/RTS/break from the guest are accepted and dropped (a pipe cannot carry them).
-- Server mode survives the peer disconnecting and waits for a new one; bytes written with no peer are dropped.
-  Client mode reports the bridge dead if the pipe breaks (re-insert the port).
+- Both modes survive the peer going away: server mode re-listens, client mode retries every 250 ms. Bytes written with no peer are dropped,
+  and the synthesized CTS/DSR/DCD drop while disconnected.
 - Pipes are offered in the serial-forward "insert" menu: two fixed entries for `cerf_com1`, plus any from the env var
   `CERF_SERIAL_PIPES="pipe:other;pipe-server:another"` (set before launching CERF).
 
@@ -59,6 +59,15 @@ use that name in 86Box or set `CERF_SERIAL_PIPES` for others.
 3. Win98: install ActiveSync 3.x, Settings > Connection Settings: allow serial cable connection on COM1.
    Set the guest COM1 to 115200 (ActiveSync's default) or lower (19200/57600) if unreliable.
 4. On the E-55, start the connection (Start > Programs > Communication > ActiveSync / or cradle with a serial cable).
+
+## VirtualBox
+
+Machine Settings > Serial Ports > Port 1: Enable, COM1, **Port Mode = Host Pipe**, Path/Address `\\.\pipe\cerf_com1`.
+- **"Create Pipe" checked** (VirtualBox is the server): in CERF use the **connect** entry. This is the usual choice.
+- **"Create Pipe" unchecked** (VirtualBox is the client): it needs the pipe to already exist, so insert the CERF **listen** entry first, then start the VM.
+With "connect", the "Create Pipe" checkbox *must* be on, otherwise nobody creates the pipe and CERF has nothing to connect to.
+Newer builds keep retrying the connection every 250 ms and reconnect on their own when the VM reboots, so start order no longer matters
+for "connect", and you no longer need to eject/re-insert after a guest reboot.
 
 ## Risks / unknowns (please test)
 

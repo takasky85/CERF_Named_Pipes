@@ -71,7 +71,7 @@ index 55a8cc8..7b6a673 100644
      if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DEVICEMAP\\SERIALCOMM", 0,
                        KEY_READ, &key) != ERROR_SUCCESS)
 diff --git a/src/platform/host_serial_port_win32.cpp b/src/platform/host_serial_port_win32.cpp
-index a383717..7e198d0 100644
+index a383717..0f27c23 100644
 --- a/src/platform/host_serial_port_win32.cpp
 +++ b/src/platform/host_serial_port_win32.cpp
 @@ -4,6 +4,9 @@
@@ -84,7 +84,7 @@ index a383717..7e198d0 100644
  #include <cerfcore/platform/wide_text_win32.h>
  #include "host_clock.h"
  #include "host_wait_timer.h"
-@@ -12,11 +15,47 @@ namespace cerfcore {
+@@ -12,11 +15,49 @@ namespace cerfcore {
  
  namespace host_platform {
  
@@ -121,6 +121,8 @@ index a383717..7e198d0 100644
 +    bool   is_pipe          = false;
 +    bool   pipe_server      = false;
 +    bool   pipe_connected   = false;
++    bool   pipe_open        = false;
++    std::wstring pipe_path;
 +    HANDLE connect_event    = nullptr;
 +    bool   connect_pending  = false;
 +    OVERLAPPED connect_ov{};
@@ -132,7 +134,7 @@ index a383717..7e198d0 100644
      HostWaitTimer pace_timer;
  };
  
-@@ -25,6 +64,28 @@ HostSerialPort::HostSerialPort() : impl_(std::make_unique<Impl>()) {}
+@@ -25,6 +66,28 @@ HostSerialPort::HostSerialPort() : impl_(std::make_unique<Impl>()) {}
  HostSerialPort::~HostSerialPort() { Close(); }
  
  bool HostSerialPort::Open(const std::string& name, uint32_t& error) {
@@ -148,20 +150,20 @@ index a383717..7e198d0 100644
 +                                        4096, 4096, 0, nullptr);
 +            if (h == INVALID_HANDLE_VALUE) { error = GetLastError(); return false; }
 +            p.handle = h;
++            p.pipe_open = true;
 +            p.connect_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 +            return true;
 +        }
-+        HANDLE h = CreateFileW(pipe.path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-+                               OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
-+        if (h == INVALID_HANDLE_VALUE) { error = GetLastError(); return false; }
-+        p.handle         = h;
-+        p.pipe_connected = true;
++        // Client: do not fail if the peer is not up yet. The reader keeps trying to connect
++        // (and reconnects after the peer goes away), so VM and emulator can start in any order.
++        p.pipe_path = pipe.path;
++        p.pipe_open = true;
 +        return true;
 +    }
      const std::wstring path = L"\\\\.\\" + Utf8ToWide(name.c_str());
      HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                             OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
-@@ -37,12 +98,15 @@ bool HostSerialPort::Open(const std::string& name, uint32_t& error) {
+@@ -37,12 +100,15 @@ bool HostSerialPort::Open(const std::string& name, uint32_t& error) {
  }
  
  void HostSerialPort::StartIo(uint32_t read_timeout_ms, uint32_t write_timeout_ms) {
@@ -183,24 +185,28 @@ index a383717..7e198d0 100644
  
      impl_->read_event  = CreateEventW(nullptr, TRUE, FALSE, nullptr);
      impl_->write_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-@@ -52,6 +116,8 @@ void HostSerialPort::StartIo(uint32_t read_timeout_ms, uint32_t write_timeout_ms
+@@ -52,6 +118,8 @@ void HostSerialPort::StartIo(uint32_t read_timeout_ms, uint32_t write_timeout_ms
  
  void HostSerialPort::Close() {
      Impl& p = *impl_;
 +    if (p.connect_event) { CloseHandle(p.connect_event); p.connect_event = nullptr; }
-+    p.connect_pending = p.pipe_connected = p.is_pipe = p.pipe_server = false;
++    p.connect_pending = p.pipe_connected = p.is_pipe = p.pipe_server = p.pipe_open = false;
      if (p.handle)      { CloseHandle(p.handle);      p.handle      = nullptr; }
      if (p.read_event)  { CloseHandle(p.read_event);  p.read_event  = nullptr; }
      if (p.write_event) { CloseHandle(p.write_event); p.write_event = nullptr; }
-@@ -62,6 +128,7 @@ void HostSerialPort::Close() {
- bool HostSerialPort::IsOpen() const { return impl_->handle != nullptr; }
+@@ -59,9 +127,10 @@ void HostSerialPort::Close() {
+     p.pace_timer.Close();
+ }
+ 
+-bool HostSerialPort::IsOpen() const { return impl_->handle != nullptr; }
++bool HostSerialPort::IsOpen() const { return impl_->handle != nullptr || impl_->pipe_open; }
  
  SerialConfigureResult HostSerialPort::Configure(const SerialPortSettings& s, uint32_t& error) {
 +    if (impl_->is_pipe) return SerialConfigureResult::kApplied;  // a pipe has no line settings
      DCB dcb{};
      dcb.DCBlength = sizeof(dcb);
      if (!GetCommState(impl_->handle, &dcb)) return SerialConfigureResult::kStateUnreadable;
-@@ -99,23 +166,32 @@ SerialConfigureResult HostSerialPort::Configure(const SerialPortSettings& s, uin
+@@ -99,23 +168,32 @@ SerialConfigureResult HostSerialPort::Configure(const SerialPortSettings& s, uin
  }
  
  void HostSerialPort::SetControlLines(bool dtr, bool rts) {
@@ -233,11 +239,35 @@ index a383717..7e198d0 100644
      DWORD ms = 0;
      if (!GetCommModemStatus(impl_->handle, &ms)) return false;
      lines = 0;
-@@ -128,6 +204,31 @@ bool HostSerialPort::ModemLines(uint8_t& lines) {
+@@ -128,6 +206,55 @@ bool HostSerialPort::ModemLines(uint8_t& lines) {
  
  SerialIoResult HostSerialPort::Read(uint8_t* buf, uint32_t size, uint32_t& got,
                                      uint32_t& error) {
 +    Impl& pi = *impl_;
++    // The pipe's peer disconnected (VM powered off/rebooted, emulator closed, ...). A server pipe goes
++    // back to listening for a new peer; a client pipe closes its handle and reconnects from this loop.
++    auto PipePeerGone = [](Impl& p) {
++        p.pipe_connected = false;
++        if (p.pipe_server) {
++            DisconnectNamedPipe(p.handle);
++        } else if (p.handle) {
++            HANDLE h = p.handle;
++            p.handle = nullptr;
++            CloseHandle(h);
++        }
++    };
++    if (pi.is_pipe && !pi.pipe_server && !pi.pipe_connected) {
++        HANDLE h = CreateFileW(pi.pipe_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
++                               OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
++        if (h != INVALID_HANDLE_VALUE) {
++            pi.handle         = h;
++            pi.pipe_connected = true;
++        } else if (WaitForSingleObject(pi.stop_event, 250) == WAIT_OBJECT_0) {
++            return SerialIoResult::kStopped;  // peer not there (yet): retry every 250 ms
++        }
++        got = 0;
++        return SerialIoResult::kDone;
++    }
 +    if (pi.is_pipe && pi.pipe_server && !pi.pipe_connected) {
 +        // Wait (in short slices, so modem-line polling stays live) for the peer to connect.
 +        if (!pi.connect_pending) {
@@ -265,13 +295,12 @@ index a383717..7e198d0 100644
      OVERLAPPED ov{};
      ov.hEvent = impl_->read_event;
      DWORD n = 0;
-@@ -135,21 +236,51 @@ SerialIoResult HostSerialPort::Read(uint8_t* buf, uint32_t size, uint32_t& got,
+@@ -135,21 +262,45 @@ SerialIoResult HostSerialPort::Read(uint8_t* buf, uint32_t size, uint32_t& got,
      if (!ReadFile(impl_->handle, buf, size, &n, &ov)) {
          const DWORD err = GetLastError();
          if (err != ERROR_IO_PENDING) {
-+            if (pi.is_pipe && pi.pipe_server && (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED)) {
-+                DisconnectNamedPipe(pi.handle);
-+                pi.pipe_connected = false;
++            if (pi.is_pipe) {  // peer went away: server re-listens, client reconnects
++                PipePeerGone(pi);
 +                got = 0;
 +                return SerialIoResult::kDone;
 +            }
@@ -295,14 +324,9 @@ index a383717..7e198d0 100644
 -        if (!GetOverlappedResult(impl_->handle, &ov, &n, FALSE)) n = 0;
 +        if (!GetOverlappedResult(impl_->handle, &ov, &n, FALSE)) {
 +            if (pi.is_pipe) {
-+                if (pi.pipe_server) {  // peer went away: go back to waiting for a new one
-+                    DisconnectNamedPipe(pi.handle);
-+                    pi.pipe_connected = false;
-+                    got = 0;
-+                    return SerialIoResult::kDone;
-+                }
-+                error = GetLastError();
-+                return SerialIoResult::kFailed;
++                PipePeerGone(pi);
++                got = 0;
++                return SerialIoResult::kDone;
 +            }
 +            n = 0;
 +        }
@@ -312,10 +336,26 @@ index a383717..7e198d0 100644
  }
  
  SerialIoResult HostSerialPort::WriteByte(uint8_t value, uint32_t& wrote, uint32_t& error) {
-+    if (impl_->is_pipe && impl_->pipe_server && !impl_->pipe_connected) {
-+        wrote = 1;  // nobody is listening: drop, like a cable that is not plugged in
++    if (impl_->is_pipe && (!impl_->pipe_connected || !impl_->handle)) {
++        wrote = 1;  // nobody on the other end: drop, like a cable that is not plugged in
 +        return SerialIoResult::kDone;
 +    }
      OVERLAPPED ov{};
      ov.hEvent = impl_->write_event;
      DWORD n = 0;
+@@ -157,6 +308,7 @@ SerialIoResult HostSerialPort::WriteByte(uint8_t value, uint32_t& wrote, uint32_
+     if (!WriteFile(impl_->handle, &value, 1, &n, &ov)) {
+         const DWORD err = GetLastError();
+         if (err != ERROR_IO_PENDING) {
++            if (impl_->is_pipe) { wrote = 1; return SerialIoResult::kDone; }  // reader notices the break
+             error = err;
+             return SerialIoResult::kFailed;
+         }
+@@ -166,6 +318,7 @@ SerialIoResult HostSerialPort::WriteByte(uint8_t value, uint32_t& wrote, uint32_
+             return SerialIoResult::kStopped;
+         }
+         if (!GetOverlappedResult(impl_->handle, &ov, &n, FALSE)) {
++            if (impl_->is_pipe) { wrote = 1; return SerialIoResult::kDone; }
+             error = GetLastError();
+             return SerialIoResult::kFailed;
+         }
