@@ -1,0 +1,289 @@
+diff --git a/src/platform/host_serial_port_list_win32.cpp b/src/platform/host_serial_port_list_win32.cpp
+index 55a8cc8..e62facd 100644
+--- a/src/platform/host_serial_port_list_win32.cpp
++++ b/src/platform/host_serial_port_list_win32.cpp
+@@ -4,14 +4,35 @@
+ #define NOMINMAX
+ #include <windows.h>
+ 
++#include <cstdlib>
++#include <string>
++
+ #include <cerfcore/platform/wide_text_win32.h>
+ 
+ namespace cerfcore {
+ 
+ namespace host_platform {
+ 
++// Extra named-pipe endpoints from CERF_SERIAL_PIPES, ';'-separated, each "pipe:NAME" (connect to a
++// pipe another program serves, e.g. 86Box "server") or "pipe-server:NAME" (create it and wait for
++// the peer, e.g. 86Box "client"). They show up in the serial-forward insert menu like COM ports.
++static void AppendConfiguredPipes(std::vector<std::string>& ports) {
++    const char* env = std::getenv("CERF_SERIAL_PIPES");
++    if (!env) return;
++    std::string all = env;
++    size_t pos = 0;
++    while (pos <= all.size()) {
++        size_t end = all.find(';', pos);
++        if (end == std::string::npos) end = all.size();
++        const std::string item = all.substr(pos, end - pos);
++        if (!item.empty()) ports.push_back(item);
++        pos = end + 1;
++    }
++}
++
+ std::vector<std::string> EnumerateSerialPorts() {
+     std::vector<std::string> ports;
++    AppendConfiguredPipes(ports);
+     HKEY key;
+     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DEVICEMAP\\SERIALCOMM", 0,
+                       KEY_READ, &key) != ERROR_SUCCESS)
+diff --git a/src/platform/host_serial_port_win32.cpp b/src/platform/host_serial_port_win32.cpp
+index a383717..7e198d0 100644
+--- a/src/platform/host_serial_port_win32.cpp
++++ b/src/platform/host_serial_port_win32.cpp
+@@ -4,6 +4,9 @@
+ #define NOMINMAX
+ #include <windows.h>
+ 
++#include <cstring>
++#include <string>
++
+ #include <cerfcore/platform/wide_text_win32.h>
+ #include "host_clock.h"
+ #include "host_wait_timer.h"
+@@ -12,11 +15,47 @@ namespace cerfcore {
+ 
+ namespace host_platform {
+ 
++namespace {
++
++// Named-pipe endpoints. "pipe:NAME" / "\\\\.\\pipe\\NAME" connects to a pipe that another process
++// (e.g. 86Box in "server" mode) already created. "pipe-server:NAME" creates the pipe and waits for
++// the peer (e.g. 86Box in "client" mode) to connect.
++struct PipeSpec {
++    bool         is_pipe = false;
++    bool         server  = false;
++    std::wstring path;
++};
++
++PipeSpec ParsePipeSpec(const std::string& name) {
++    PipeSpec spec;
++    auto starts = [&](const char* prefix) {
++        const size_t n = strlen(prefix);
++        return name.size() > n && _strnicmp(name.c_str(), prefix, n) == 0;
++    };
++    std::string rest;
++    if (starts("pipe-server:"))      { spec.server = true; rest = name.substr(12); }
++    else if (starts("pipe:"))        { rest = name.substr(5); }
++    else if (starts("\\\\.\\pipe\\")) { rest = name.substr(9); }
++    else return spec;
++    spec.is_pipe = true;
++    spec.path    = L"\\\\.\\pipe\\" + Utf8ToWide(rest.c_str());
++    return spec;
++}
++
++}
++
+ struct HostSerialPort::Impl {
++    bool   is_pipe          = false;
++    bool   pipe_server      = false;
++    bool   pipe_connected   = false;
++    HANDLE connect_event    = nullptr;
++    bool   connect_pending  = false;
++    OVERLAPPED connect_ov{};
+     HANDLE handle      = nullptr;
+     HANDLE read_event  = nullptr;
+     HANDLE write_event = nullptr;
+     HANDLE stop_event  = nullptr;
++    DWORD  read_timeout_ms  = 50;
+     HostWaitTimer pace_timer;
+ };
+ 
+@@ -25,6 +64,28 @@ HostSerialPort::HostSerialPort() : impl_(std::make_unique<Impl>()) {}
+ HostSerialPort::~HostSerialPort() { Close(); }
+ 
+ bool HostSerialPort::Open(const std::string& name, uint32_t& error) {
++    const PipeSpec pipe = ParsePipeSpec(name);
++    if (pipe.is_pipe) {
++        Impl& p = *impl_;
++        p.is_pipe     = true;
++        p.pipe_server = pipe.server;
++        if (pipe.server) {
++            HANDLE h = CreateNamedPipeW(pipe.path.c_str(),
++                                        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
++                                        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1,
++                                        4096, 4096, 0, nullptr);
++            if (h == INVALID_HANDLE_VALUE) { error = GetLastError(); return false; }
++            p.handle = h;
++            p.connect_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
++            return true;
++        }
++        HANDLE h = CreateFileW(pipe.path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
++                               OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
++        if (h == INVALID_HANDLE_VALUE) { error = GetLastError(); return false; }
++        p.handle         = h;
++        p.pipe_connected = true;
++        return true;
++    }
+     const std::wstring path = L"\\\\.\\" + Utf8ToWide(name.c_str());
+     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                            OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+@@ -37,12 +98,15 @@ bool HostSerialPort::Open(const std::string& name, uint32_t& error) {
+ }
+ 
+ void HostSerialPort::StartIo(uint32_t read_timeout_ms, uint32_t write_timeout_ms) {
+-    COMMTIMEOUTS to{};
+-    to.ReadIntervalTimeout        = MAXDWORD;
+-    to.ReadTotalTimeoutMultiplier = MAXDWORD;
+-    to.ReadTotalTimeoutConstant   = read_timeout_ms;
+-    to.WriteTotalTimeoutConstant  = write_timeout_ms;
+-    SetCommTimeouts(impl_->handle, &to);
++    impl_->read_timeout_ms = read_timeout_ms;
++    if (!impl_->is_pipe) {
++        COMMTIMEOUTS to{};
++        to.ReadIntervalTimeout        = MAXDWORD;
++        to.ReadTotalTimeoutMultiplier = MAXDWORD;
++        to.ReadTotalTimeoutConstant   = read_timeout_ms;
++        to.WriteTotalTimeoutConstant  = write_timeout_ms;
++        SetCommTimeouts(impl_->handle, &to);
++    }
+ 
+     impl_->read_event  = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+     impl_->write_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+@@ -52,6 +116,8 @@ void HostSerialPort::StartIo(uint32_t read_timeout_ms, uint32_t write_timeout_ms
+ 
+ void HostSerialPort::Close() {
+     Impl& p = *impl_;
++    if (p.connect_event) { CloseHandle(p.connect_event); p.connect_event = nullptr; }
++    p.connect_pending = p.pipe_connected = p.is_pipe = p.pipe_server = false;
+     if (p.handle)      { CloseHandle(p.handle);      p.handle      = nullptr; }
+     if (p.read_event)  { CloseHandle(p.read_event);  p.read_event  = nullptr; }
+     if (p.write_event) { CloseHandle(p.write_event); p.write_event = nullptr; }
+@@ -62,6 +128,7 @@ void HostSerialPort::Close() {
+ bool HostSerialPort::IsOpen() const { return impl_->handle != nullptr; }
+ 
+ SerialConfigureResult HostSerialPort::Configure(const SerialPortSettings& s, uint32_t& error) {
++    if (impl_->is_pipe) return SerialConfigureResult::kApplied;  // a pipe has no line settings
+     DCB dcb{};
+     dcb.DCBlength = sizeof(dcb);
+     if (!GetCommState(impl_->handle, &dcb)) return SerialConfigureResult::kStateUnreadable;
+@@ -99,23 +166,32 @@ SerialConfigureResult HostSerialPort::Configure(const SerialPortSettings& s, uin
+ }
+ 
+ void HostSerialPort::SetControlLines(bool dtr, bool rts) {
++    if (impl_->is_pipe) return;
+     EscapeCommFunction(impl_->handle, dtr ? SETDTR : CLRDTR);
+     EscapeCommFunction(impl_->handle, rts ? SETRTS : CLRRTS);
+ }
+ 
+ bool HostSerialPort::Drain(uint32_t& error) {
++    if (impl_->is_pipe) return true;
+     if (FlushFileBuffers(impl_->handle) != FALSE) return true;
+     error = GetLastError();
+     return false;
+ }
+ 
+ bool HostSerialPort::SetBreak(bool on, uint32_t& error) {
++    if (impl_->is_pipe) return true;
+     if ((on ? SetCommBreak(impl_->handle) : ClearCommBreak(impl_->handle)) != FALSE) return true;
+     error = GetLastError();
+     return false;
+ }
+ 
+ bool HostSerialPort::ModemLines(uint8_t& lines) {
++    if (impl_->is_pipe) {
++        // A pipe carries no modem signals: present a null-modem cable that is wired
++        // (CTS/DSR/DCD asserted) while a peer is connected and unplugged otherwise.
++        lines = impl_->pipe_connected ? (kModemCts | kModemDsr | kModemDcd) : 0;
++        return true;
++    }
+     DWORD ms = 0;
+     if (!GetCommModemStatus(impl_->handle, &ms)) return false;
+     lines = 0;
+@@ -128,6 +204,31 @@ bool HostSerialPort::ModemLines(uint8_t& lines) {
+ 
+ SerialIoResult HostSerialPort::Read(uint8_t* buf, uint32_t size, uint32_t& got,
+                                     uint32_t& error) {
++    Impl& pi = *impl_;
++    if (pi.is_pipe && pi.pipe_server && !pi.pipe_connected) {
++        // Wait (in short slices, so modem-line polling stays live) for the peer to connect.
++        if (!pi.connect_pending) {
++            pi.connect_ov = OVERLAPPED{};
++            pi.connect_ov.hEvent = pi.connect_event;
++            ResetEvent(pi.connect_event);
++            if (ConnectNamedPipe(pi.handle, &pi.connect_ov)) {
++                pi.pipe_connected = true;
++            } else {
++                const DWORD err = GetLastError();
++                if (err == ERROR_PIPE_CONNECTED) pi.pipe_connected = true;
++                else if (err == ERROR_IO_PENDING) pi.connect_pending = true;
++                else { error = err; return SerialIoResult::kFailed; }
++            }
++        }
++        if (pi.connect_pending) {
++            const HANDLE waits[2] = { pi.connect_event, pi.stop_event };
++            const DWORD w = WaitForMultipleObjects(2, waits, FALSE, pi.read_timeout_ms);
++            if (w == WAIT_OBJECT_0)  { pi.connect_pending = false; pi.pipe_connected = true; }
++            else if (w != WAIT_TIMEOUT) { CancelIoEx(pi.handle, &pi.connect_ov); return SerialIoResult::kStopped; }
++        }
++        got = 0;
++        return SerialIoResult::kDone;
++    }
+     OVERLAPPED ov{};
+     ov.hEvent = impl_->read_event;
+     DWORD n = 0;
+@@ -135,21 +236,51 @@ SerialIoResult HostSerialPort::Read(uint8_t* buf, uint32_t size, uint32_t& got,
+     if (!ReadFile(impl_->handle, buf, size, &n, &ov)) {
+         const DWORD err = GetLastError();
+         if (err != ERROR_IO_PENDING) {
++            if (pi.is_pipe && pi.pipe_server && (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED)) {
++                DisconnectNamedPipe(pi.handle);
++                pi.pipe_connected = false;
++                got = 0;
++                return SerialIoResult::kDone;
++            }
+             error = err;
+             return SerialIoResult::kFailed;
+         }
+         const HANDLE waits[2] = { impl_->read_event, impl_->stop_event };
+-        if (WaitForMultipleObjects(2, waits, FALSE, INFINITE) != WAIT_OBJECT_0) {
++        const DWORD w = WaitForMultipleObjects(2, waits, FALSE,
++                                               pi.is_pipe ? pi.read_timeout_ms : INFINITE);
++        if (w == WAIT_TIMEOUT) {  // pipe only: surface periodically so modem lines get polled
++            CancelIoEx(impl_->handle, &ov);
++            GetOverlappedResult(impl_->handle, &ov, &n, TRUE);
++            got = n;
++            return SerialIoResult::kDone;
++        }
++        if (w != WAIT_OBJECT_0) {
+             CancelIoEx(impl_->handle, &ov);
+             return SerialIoResult::kStopped;
+         }
+-        if (!GetOverlappedResult(impl_->handle, &ov, &n, FALSE)) n = 0;
++        if (!GetOverlappedResult(impl_->handle, &ov, &n, FALSE)) {
++            if (pi.is_pipe) {
++                if (pi.pipe_server) {  // peer went away: go back to waiting for a new one
++                    DisconnectNamedPipe(pi.handle);
++                    pi.pipe_connected = false;
++                    got = 0;
++                    return SerialIoResult::kDone;
++                }
++                error = GetLastError();
++                return SerialIoResult::kFailed;
++            }
++            n = 0;
++        }
+     }
+     got = n;
+     return SerialIoResult::kDone;
+ }
+ 
+ SerialIoResult HostSerialPort::WriteByte(uint8_t value, uint32_t& wrote, uint32_t& error) {
++    if (impl_->is_pipe && impl_->pipe_server && !impl_->pipe_connected) {
++        wrote = 1;  // nobody is listening: drop, like a cable that is not plugged in
++        return SerialIoResult::kDone;
++    }
+     OVERLAPPED ov{};
+     ov.hEvent = impl_->write_event;
+     DWORD n = 0;
