@@ -31,14 +31,13 @@ index c034082..a6a9148 100644
  }
  
 diff --git a/src/platform/host_serial_port_list_win32.cpp b/src/platform/host_serial_port_list_win32.cpp
-index 55a8cc8..e62facd 100644
+index 55a8cc8..7b6a673 100644
 --- a/src/platform/host_serial_port_list_win32.cpp
 +++ b/src/platform/host_serial_port_list_win32.cpp
 @@ -4,14 +4,35 @@
  #define NOMINMAX
  #include <windows.h>
  
-+#include <cstdlib>
 +#include <string>
 +
  #include <cerfcore/platform/wide_text_win32.h>
@@ -51,9 +50,10 @@ index 55a8cc8..e62facd 100644
 +// pipe another program serves, e.g. 86Box "server") or "pipe-server:NAME" (create it and wait for
 +// the peer, e.g. 86Box "client"). They show up in the serial-forward insert menu like COM ports.
 +static void AppendConfiguredPipes(std::vector<std::string>& ports) {
-+    const char* env = std::getenv("CERF_SERIAL_PIPES");
-+    if (!env) return;
-+    std::string all = env;
++    char   buf[2048];
++    const DWORD n = GetEnvironmentVariableA("CERF_SERIAL_PIPES", buf, sizeof buf);
++    if (n == 0 || n >= sizeof buf) return;
++    std::string all(buf, n);
 +    size_t pos = 0;
 +    while (pos <= all.size()) {
 +        size_t end = all.find(';', pos);
