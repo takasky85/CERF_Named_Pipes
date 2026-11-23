@@ -1,0 +1,147 @@
+name: build-e55-windows
+
+# Builds CERF (pinned upstream) trimmed to the Casio Cassiopeia E-55, plus the named-pipe serial backend.
+# The first run builds Qt and vcpkg dependencies from source and takes well over an hour; caches speed up later runs.
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-e55-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    env:
+      HOST_BRANCH: win32-x86
+
+    steps:
+      - name: Check out this repository (patches and tools)
+        uses: actions/checkout@v4
+        with:
+          path: e55
+
+      - name: Read the upstream pin
+        id: pin
+        shell: bash
+        run: echo "sha=$(sed -n 's/^cerf=//p' e55/UPSTREAM.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out upstream CERF at the pin
+        uses: actions/checkout@v4
+        with:
+          repository: gweslab/cerf
+          ref: ${{ steps.pin.outputs.sha }}
+          submodules: false
+
+      - name: Fetch core libraries
+        run: |
+          git submodule update --init libservicelocator libCerfEngine libCerfCore
+          git -C libCerfCore submodule update --init sad
+
+      - name: Apply the named-pipe patch to libCerfCore
+        run: git -C libCerfCore apply --verbose ../e55/patches/libCerfCore-named-pipe.patch
+
+      - name: Trim to the E-55
+        run: python e55/tools/trim_e55.py .
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Name the Qt build folder
+        id: qt
+        shell: pwsh
+        run: python tools/qt_windows.py --cache-outputs >> $env:GITHUB_OUTPUT
+
+      - name: Restore the Qt build
+        id: qt-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.qt.outputs.path }}
+          key: qt-win7-x86-${{ steps.qt.outputs.key }}
+
+      - name: Build Qt (only when it is not cached)
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: python tools/qt_windows.py --ensure
+
+      - name: Save the Qt build
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.qt.outputs.path }}
+          key: qt-win7-x86-${{ steps.qt.outputs.key }}
+
+      - uses: ./.github/actions/vcpkg-windows
+        with:
+          host-branch: ${{ env.HOST_BRANCH }}
+
+      - uses: ./.github/actions/rust-library-cache
+        with:
+          stage: restore
+          library: resvg
+          host-branch: ${{ env.HOST_BRANCH }}
+          python: python
+
+      - uses: ./.github/actions/rust-library-cache
+        with:
+          stage: restore
+          library: librashader
+          host-branch: ${{ env.HOST_BRANCH }}
+          python: python
+
+      - name: Stamp version.h with CI build info
+        id: version
+        shell: pwsh
+        run: python tools/stamp_version.py --run=${{ github.run_number }} --sha=${{ github.sha }} --host-branch=${{ env.HOST_BRANCH }}
+
+      - name: Install ccache
+        shell: bash
+        run: python tools/ccache_windows.py --install "$GITHUB_PATH"
+
+      - uses: ./.github/actions/compiler-cache
+        with:
+          stage: restore
+          host-branch: ${{ env.HOST_BRANCH }}
+
+      - name: Build
+        shell: pwsh
+        run: python build.py --config Release --mode production --unstable
+
+      - uses: ./.github/actions/compiler-cache
+        if: ${{ !cancelled() }}
+        with:
+          stage: save
+          host-branch: ${{ env.HOST_BRANCH }}
+
+      - uses: ./.github/actions/rust-library-cache
+        if: ${{ !cancelled() }}
+        with:
+          stage: save
+          library: resvg
+          host-branch: ${{ env.HOST_BRANCH }}
+          python: python
+
+      - uses: ./.github/actions/rust-library-cache
+        if: ${{ !cancelled() }}
+        with:
+          stage: save
+          library: librashader
+          host-branch: ${{ env.HOST_BRANCH }}
+          python: python
+
+      - name: Add the notes
+        shell: bash
+        run: cp e55/README.md "${{ steps.version.outputs.out }}/README-E55-NAMED-PIPES.md"
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: cerf-e55-named-pipes-win32
+          path: ${{ steps.version.outputs.out }}/

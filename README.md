@@ -1,6 +1,6 @@
 # CERF E-55 serial over a Windows named pipe (86Box -> ActiveSync)
 
-Status: proof of concept. **The code compiles (MinGW syntax check) but has NOT been run.**
+Status: proof of concept. **The code compiles (MinGW syntax check) but has NOT been run, and the CI workflow has not yet been verified.**
 No Windows, 86Box, Wine or E-55 ROM was available where this was written.
 
 ## Findings
@@ -17,7 +17,25 @@ No Windows, 86Box, Wine or E-55 ROM was available where this was written.
   devices: that is a large unbuilt/untestable refactor and the pipe backend is board-independent. At run time the
   E-55 is selected with `--device=<name>`; a ROM image is not shipped and must be provided by you.
 
-## What the patch does (`0001-...patch`, against libCerfCore, Windows only)
+## Repository layout / GitHub build
+
+- `patches/libCerfCore-named-pipe.patch` - the backend + menu entries, against libCerfCore `379f8b1` (the commit upstream pins).
+- `tools/trim_e55.py` - trims the board database to the E-55 only (and skips the CE guest apps, which need a private toolchain).
+- `.github/workflows/build-e55.yml` - checks out `gweslab/cerf` at the commit in `UPSTREAM.txt`, applies the patch, trims, and builds
+  Windows x86 with upstream's own `build.py`. Artifact: `cerf-e55-named-pipes-win32`. Run it from the Actions tab (or push to `main`).
+  The first run builds Qt/vcpkg from source (1h+); later runs use caches.
+- "E-55 only" means the device list, the board database and the board family. The C++ of other boards is still compiled but dead
+  (it only registers for its own board family). Physically deleting it needs a local build to check; not done.
+
+## GUI
+
+Right-click (or click) the COM socket icon in the emulator's socket bar > Insert > Serial Port Forwarder. New entries:
+- `Named pipe \\.\pipe\cerf_com1 (connect - 86Box server)`
+- `Named pipe \\.\pipe\cerf_com1 (listen - 86Box client)`
+plus any pipes from `CERF_SERIAL_PIPES`. The pipe name is fixed at `cerf_com1` in the menu (a free-text prompt is not implemented);
+use that name in 86Box or set `CERF_SERIAL_PIPES` for others.
+
+## What the patch does (Windows only)
 
 - `HostSerialPort::Open` accepts:
   - `pipe:NAME` or `\\.\pipe\NAME`: CERF connects as a client to a pipe someone else created (86Box **Server**).
@@ -27,8 +45,8 @@ No Windows, 86Box, Wine or E-55 ROM was available where this was written.
   DTR/RTS/break from the guest are accepted and dropped (a pipe cannot carry them).
 - Server mode survives the peer disconnecting and waits for a new one; bytes written with no peer are dropped.
   Client mode reports the bridge dead if the pipe breaks (re-insert the port).
-- Pipes are offered in the serial-forward "insert" menu through the env var
-  `CERF_SERIAL_PIPES="pipe:cerf_com1;pipe-server:cerf_com2"` (set before launching CERF).
+- Pipes are offered in the serial-forward "insert" menu: two fixed entries for `cerf_com1`, plus any from the env var
+  `CERF_SERIAL_PIPES="pipe:other;pipe-server:another"` (set before launching CERF).
 
 ## 86Box + ActiveSync setup
 
@@ -36,8 +54,8 @@ No Windows, 86Box, Wine or E-55 ROM was available where this was written.
    Configure it: mode **Named Pipe (Server)**, pipe name e.g. `cerf_com1` (86Box makes `\\.\pipe\cerf_com1`).
    (Option B: 86Box **Named Pipe (Client)** and use `pipe-server:cerf_com1` in CERF.) Set 86Box's host
    baud/"data bits" to match if it asks; start the VM first for option A.
-2. CERF: `set CERF_SERIAL_PIPES=pipe:cerf_com1`, run with `--device=` for the E-55, then insert the serial
-   forward from the COM socket menu and pick `pipe:cerf_com1`.
+2. CERF: run the E-55 (you supply the ROM), open the COM socket menu > Insert > Serial Port Forwarder >
+   "Named pipe ... (connect - 86Box server)".
 3. Win98: install ActiveSync 3.x, Settings > Connection Settings: allow serial cable connection on COM1.
    Set the guest COM1 to 115200 (ActiveSync's default) or lower (19200/57600) if unreliable.
 4. On the E-55, start the connection (Start > Programs > Communication > ActiveSync / or cradle with a serial cable).

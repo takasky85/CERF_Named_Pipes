@@ -1,3 +1,35 @@
+diff --git a/src/peripherals/serial/serial_forward_commands.cpp b/src/peripherals/serial/serial_forward_commands.cpp
+index c034082..a6a9148 100644
+--- a/src/peripherals/serial/serial_forward_commands.cpp
++++ b/src/peripherals/serial/serial_forward_commands.cpp
+@@ -8,10 +8,25 @@ namespace cerfcore {
+ REGISTER_SERVICE(SerialForwardCommands);
+ 
+ std::vector<InsertCommand> SerialForwardCommands::Commands() const {
+-    const std::vector<std::string> ports = host_platform::EnumerateSerialPorts();
++    std::vector<std::string> ports = host_platform::EnumerateSerialPorts();
++#ifdef _WIN32
++    // Named-pipe endpoints (see HostSerialPort): the fixed entries below are meant for 86Box serial
++    // passthrough. Extra ones can come from CERF_SERIAL_PIPES (already in `ports`, listed first).
++    //   pipe:NAME         - connect to \\.\pipe\NAME created by 86Box ("Named Pipe (Server)")
++    //   pipe-server:NAME  - create \\.\pipe\NAME and wait for 86Box ("Named Pipe (Client)")
++    ports.push_back("pipe:cerf_com1");
++    ports.push_back("pipe-server:cerf_com1");
++#endif
+     if (ports.empty()) return {};
+     InsertCommand insert{"insert", {}};
+-    for (const std::string& port : ports) insert.arguments.push_back(InsertArgument{port, port});
++    for (const std::string& port : ports) {
++        std::string label = port;
++        if (port.rfind("pipe:", 0) == 0)
++            label = "Named pipe \\\\.\\pipe\\" + port.substr(5) + " (connect - 86Box server)";
++        else if (port.rfind("pipe-server:", 0) == 0)
++            label = "Named pipe \\\\.\\pipe\\" + port.substr(12) + " (listen - 86Box client)";
++        insert.arguments.push_back(InsertArgument{port, label});
++    }
+     return {std::move(insert)};
+ }
+ 
 diff --git a/src/platform/host_serial_port_list_win32.cpp b/src/platform/host_serial_port_list_win32.cpp
 index 55a8cc8..e62facd 100644
 --- a/src/platform/host_serial_port_list_win32.cpp
