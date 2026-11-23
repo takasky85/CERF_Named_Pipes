@@ -81,3 +81,8 @@ for "connect", and you no longer need to eject/re-insert after a guest reboot.
   a wrong baud on either side will hang silently.
 - License: CERF is noncommercial with attribution ("Based on CE Runtime Foundation - https://cerf.cx"). Keep that if you distribute.
 - Linux/macOS backends were not changed.
+
+
+## Update
+
+The workflow now builds **all** CERF devices (E-55, EM-500, E-700, iPAQ H3600, Jornada 720, ...) because that was as easy as trimming. `tools/trim_e55.py --e55-only` restores the E-55-only device list.

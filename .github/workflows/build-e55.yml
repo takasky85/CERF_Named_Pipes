@@ -1,6 +1,6 @@
 name: build-e55-windows
 
-# Builds CERF (pinned upstream) trimmed to the Casio Cassiopeia E-55, plus the named-pipe serial backend.
+# Builds the full CERF (pinned upstream, all devices; add --e55-only to the trim step for E-55 only), plus the named-pipe serial backend.
 # The first run builds Qt and vcpkg dependencies from source and takes well over an hour; caches speed up later runs.
 
 on:
@@ -44,7 +44,7 @@ jobs:
       - name: Apply the named-pipe patch to libCerfCore
         run: git -C libCerfCore apply --verbose --ignore-whitespace ../e55/patches/libCerfCore-named-pipe.patch
 
-      - name: Trim to the E-55
+      - name: Skip the CE guest apps (they need a private toolchain); keep all devices
         run: python e55/tools/trim_e55.py .
 
       - name: Add MSBuild to PATH

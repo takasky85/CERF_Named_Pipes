@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Trim a CERF checkout so that it offers only the Casio Cassiopeia E-55.
 
+By default only the CE guest apps are skipped (all devices are kept); pass --e55-only to also trim the device list.
 Run from the root of a gweslab/cerf checkout (submodules initialised).
 
 What it does:
@@ -32,13 +33,15 @@ def prune(directory: Path, keep: str) -> int:
 
 
 def main() -> int:
-    root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    root = Path(args[0] if args else ".").resolve()
     db = root / "libCerfCore" / "db"
     if not (db / "boards" / KEEP_BOARD).is_file():
         print("not a CERF checkout (missing {})".format(db / "boards" / KEEP_BOARD))
         return 1
-    print("boards removed:", prune(db / "boards", KEEP_BOARD))
-    print("board families removed:", prune(db / "board_families", KEEP_FAMILY))
+    if "--e55-only" in sys.argv:
+        print("boards removed:", prune(db / "boards", KEEP_BOARD))
+        print("board families removed:", prune(db / "board_families", KEEP_FAMILY))
     for script in (root / "ce_apps").glob("*/build.py"):
         script.unlink()
         print("removed", script.relative_to(root))
