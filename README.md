@@ -91,7 +91,7 @@ The two named-pipe entries are now directly in the COM socket's Insert menu (`pa
 
 ## EM-500 / E-700 (experimental)
 
-Added `casio_jx670_serial_wiring.cpp` (in the libCerfCore patch), which attaches the VR4122 SIU to the serial forwarder like the E-55/Z50.
-The ROMs list "COM1 serial cable" (`Drivers\BuiltIn\Serial`, `Serial.dll`), but `Serial.dll` appears to drive the *companion-chip* 16550
-(the one CERF models as `CasioJx670Modem`), whose interrupt path is not modeled (CERF currently aborts if it asserts INTR). So this wiring may
-expose a COM socket that the guest never uses. Unverified.
+The ROMs list "COM1 serial cable" (`Drivers\BuiltIn\Serial`, `Serial.dll`). `Serial.dll` drives the *companion-chip* 16550 (CERF's
+`CasioJx670Modem`), not the VR4122 SIU (the SIU is probably the IrDA/SIR port). The patch now attaches that 16550 to a serial socket ("COM1")
+and models its interrupt: INTR -> companion status 0x0004 bit4 -> GIU pin 0 -> SYSINTR 19 (previously CERF aborted with "not yet modeled").
+The bit4 mask and exact cascade are inferred from earlier reverse-engineering comments in the source and are untested.

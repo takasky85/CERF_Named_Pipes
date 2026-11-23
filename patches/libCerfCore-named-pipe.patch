@@ -1,49 +1,106 @@
-diff --git a/src/boards/casio_jx670/casio_jx670_serial_wiring.cpp b/src/boards/casio_jx670/casio_jx670_serial_wiring.cpp
-new file mode 100644
-index 0000000..d3af909
---- /dev/null
-+++ b/src/boards/casio_jx670/casio_jx670_serial_wiring.cpp
-@@ -0,0 +1,40 @@
-+#include "../../socs/vr41xx/vr41xx_giu.h"
-+#include "../../socs/vr41xx/vr41xx_serial_wiring.h"
+diff --git a/src/boards/casio_jx670/casio_jx670_companion.cpp b/src/boards/casio_jx670/casio_jx670_companion.cpp
+index 6067600..bcdc244 100644
+--- a/src/boards/casio_jx670/casio_jx670_companion.cpp
++++ b/src/boards/casio_jx670/casio_jx670_companion.cpp
+@@ -35,6 +35,7 @@ constexpr uint16_t kIntStatusAudio   = 0x100u;
+    -> loc_9F036554, the 0x0304 cause demux @0x9F036608. */
+ constexpr uint16_t kIntStatusTouch   = 0x200u;
+ constexpr uint16_t kIntStatusKeys    = 0x2u;
++constexpr uint16_t kIntStatusModem   = 0x10u;  /* 16550 INTR -> SYSINTR 19 */
+ 
+ constexpr uint32_t kOffKeyChannel0014 = 0x0014u;
+ constexpr uint32_t kKeyChannelEnable  = 0x8u;
+@@ -157,6 +158,7 @@ void CasioJx670Companion::OnReady() {
+     audio_.Init(emu_, [this] { UpdateIrqLine(); });
+     display_.Init(emu_);
+     modem_ = &emu_.Get<CasioJx670Modem>();
++    modem_->SetIrqCallback([this] { UpdateIrqLine(); });
+     touch_.Init(emu_, [this] { UpdateIrqLine(); });
+     keys_.Init([this] { UpdateIrqLine(); },
+                [this](bool high) { emu_.Get<Vr41xxPmu>().SetPowerSwitch(high); });
+@@ -190,7 +192,8 @@ void CasioJx670Companion::PowerOnRegisters() {
+ uint16_t CasioJx670Companion::IntStatus() const {
+     return static_cast<uint16_t>((audio_.IrqPending() ? kIntStatusAudio : 0u) |
+                                  (touch_.IrqPending() ? kIntStatusTouch : 0u) |
+-                                 (keys_.IrqPending() ? kIntStatusKeys : 0u));
++                                 (keys_.IrqPending() ? kIntStatusKeys : 0u) |
++                                 ((modem_ && modem_->IrqPending()) ? kIntStatusModem : 0u));
+ }
+ 
+ uint8_t CasioJx670Companion::ReadByte(uint32_t addr) {
+@@ -402,7 +405,7 @@ void CasioJx670Companion::UpdateIrqLine() {
+     const uint32_t key_channel =
+         sys_ctrl_[(kOffKeyChannel0014 - kOffSysCtrlLo) / 4u].load(std::memory_order_acquire);
+     const bool keys = keys_.IrqPending() && (key_channel & kKeyChannelEnable) != 0u;
+-    emu_.Get<Vr41xxGiu>().SetPinLevel(kCompanionGiuPin, audio || keys || touch_.IrqPending());
++    emu_.Get<Vr41xxGiu>().SetPinLevel(kCompanionGiuPin, audio || keys || touch_.IrqPending() || (modem_ && modem_->IrqPending()));
+ }
+ 
+ void CasioJx670Companion::WriteCodecCommand(uint32_t value) {
+diff --git a/src/boards/casio_jx670/casio_jx670_modem.cpp b/src/boards/casio_jx670/casio_jx670_modem.cpp
+index fbfb959..7285d65 100644
+--- a/src/boards/casio_jx670/casio_jx670_modem.cpp
++++ b/src/boards/casio_jx670/casio_jx670_modem.cpp
+@@ -43,6 +43,8 @@ void CasioJx670Modem::OnReady() {
+     uart_ = std::make_unique<Serial16550>(
+         [this](bool a) { OnUartIrq(a); }, Serial16550::Config{},
+         Serial16550::Clock{1843200u, 1u}, line_timer_);
++    /* Expose this UART (the guest's "COM1 serial cable", serial.dll) as a host-visible serial socket. */
++    uart_->Port().AttachCradle(emu_, ObjectIdentity{"serial_port", "COM1"});
+     emu_.Get<GuestCpuReset>().RegisterResetListener([this](ResetLineKind kind) {
+         ctrl_8600_   = 0;
+         socket_a1c0_ = 0;
+@@ -94,11 +96,11 @@ bool CasioJx670Modem::TryWriteWord(uint32_t off, uint32_t value) {
+ }
+ 
+ void CasioJx670Modem::OnUartIrq(bool asserted) {
+-    if (!asserted) return;
+     /* nk_main_kernel.exe cascade 0x9F036130: companion 0x0004 bit4 -> loc_9F0369A4
+-       li $a0,0x13 (SYSINTR 19). */
+-    emu_.Get<Fatal>().Die("EM-500 companion modem 16550 asserted INTR: companion->GIU "
+-                          "cascade (0x0004 bit4 -> SYSINTR 19) not yet modeled");
++       li $a0,0x13 (SYSINTR 19). The companion folds this level into its status register and
++       GIU pin 0 (CasioJx670Companion::UpdateIrqLine). */
++    irq_.store(asserted, std::memory_order_release);
++    if (on_irq_) on_irq_();
+ }
+ 
+ void CasioJx670Modem::SaveState(StateWriter& w) const {
+diff --git a/src/boards/casio_jx670/casio_jx670_modem.h b/src/boards/casio_jx670/casio_jx670_modem.h
+index 2dea4b2..7f7ed53 100644
+--- a/src/boards/casio_jx670/casio_jx670_modem.h
++++ b/src/boards/casio_jx670/casio_jx670_modem.h
+@@ -4,7 +4,9 @@
+ #include "../../peripherals/serial/serial_16550.h"
+ #include "../../peripherals/serial/serial_device_clock_timer.h"
+ 
++#include <atomic>
+ #include <cstdint>
++#include <functional>
+ #include <memory>
+ 
+ namespace cerfcore {
+@@ -30,6 +32,11 @@ public:
+     void RestoreState(StateReader& r);
+     void PostRestore();
+ 
++    /* Level of the 16550's INTR pin; the companion ORs it into its interrupt status (0x0004 bit4)
++       and the GIU pin 0 line. */
++    bool IrqPending() const { return irq_.load(std::memory_order_acquire); }
++    void SetIrqCallback(std::function<void()> fn) { on_irq_ = std::move(fn); }
 +
-+#include <cerfcore/boards/board_context.h>
-+#include <cerfcore/core/cerf_emulator.h>
-+#include "casio_jx670_family_id.h"
-+
-+namespace cerfcore {
-+
-+namespace {
-+
-+constexpr char kSerialPortId[]    = "serial_port";
-+constexpr char kSerialPortLabel[] = "COM1";
-+
-+/* EM-500 / E-700 (VR4122): the ROM registers "COM1 serial cable" (Drivers\BuiltIn\Serial, Serial.dll) next
-+   to the companion-chip modem. Wire the SoC's SIU to the host serial forwarder like the other VR41xx
-+   boards. The cradle transceiver supply is assumed always on and carrier detect is the shared DCD GPIO;
-+   both are guesses taken from the Z50 wiring, not yet confirmed against this ROM. */
-+class CasioJx670SerialWiring : public Vr41xxSerialWiring {
-+public:
-+    using Vr41xxSerialWiring::Vr41xxSerialWiring;
-+
-+    bool ShouldRegister() override {
-+        return emu_.Get<BoardContext>().GetBoardFamilyId() == BoardFamilyId::CasioJx670;
-+    }
-+
-+    std::optional<Vr41xxSerialModem> ForSiu() const override {
-+        return Vr41xxSerialModem({kSerialPortId, kSerialPortLabel}, Vr41xxGiu::kDcdPin);
-+    }
-+
-+    bool SupplyOn() override { return true; }
-+
-+    void RegisterSupplyListener(std::function<void()>) override {}
-+};
-+
-+}
-+
-+REGISTER_SERVICE_AS(CasioJx670SerialWiring, Vr41xxSerialWiring);
-+
-+}
+ private:
+     void OnUartIrq(bool asserted);
+ 
+@@ -41,6 +48,8 @@ private:
+ 
+     SerialDeviceClockTimer       line_timer_{emu_, [this] { uart_->Port().OnTimer(); }};
+     std::unique_ptr<Serial16550> uart_;
++    std::atomic<bool>     irq_{false};
++    std::function<void()> on_irq_;
+     uint8_t  ctrl_8600_   = 0;   /* serial.dll dword_F58130[0]=0x600 -> companion 0x8600 */
+     uint16_t socket_a1c0_ = 0;
+     uint16_t socket_a1c4_ = 0;
 diff --git a/src/peripherals/serial/serial_forward_commands.cpp b/src/peripherals/serial/serial_forward_commands.cpp
 index c034082..a6a9148 100644
 --- a/src/peripherals/serial/serial_forward_commands.cpp
