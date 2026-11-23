@@ -21,24 +21,20 @@ jobs:
     timeout-minutes: 360
     env:
       HOST_BRANCH: win32-x86
+      UPSTREAM_CERF: 84d335e15d21a7d4a8729b7ff59992227bdd7c5b  # keep in sync with UPSTREAM.txt
 
     steps:
-      - name: Check out this repository (patches and tools)
-        uses: actions/checkout@v4
-        with:
-          path: e55
-
-      - name: Read the upstream pin
-        id: pin
-        shell: bash
-        run: echo "sha=$(sed -n 's/^cerf=//p' e55/UPSTREAM.txt)" >> "$GITHUB_OUTPUT"
-
       - name: Check out upstream CERF at the pin
         uses: actions/checkout@v4
         with:
           repository: gweslab/cerf
-          ref: ${{ steps.pin.outputs.sha }}
+          ref: ${{ env.UPSTREAM_CERF }}
           submodules: false
+
+      - name: Check out this repository (patches and tools)
+        uses: actions/checkout@v4
+        with:
+          path: e55
 
       - name: Fetch core libraries
         run: |
@@ -46,7 +42,7 @@ jobs:
           git -C libCerfCore submodule update --init sad
 
       - name: Apply the named-pipe patch to libCerfCore
-        run: git -C libCerfCore apply --verbose ../e55/patches/libCerfCore-named-pipe.patch
+        run: git -C libCerfCore apply --verbose --ignore-whitespace ../e55/patches/libCerfCore-named-pipe.patch
 
       - name: Trim to the E-55
         run: python e55/tools/trim_e55.py .
