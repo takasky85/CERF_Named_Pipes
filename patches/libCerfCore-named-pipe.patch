@@ -1,5 +1,5 @@
 diff --git a/src/boards/casio_jx670/casio_jx670_companion.cpp b/src/boards/casio_jx670/casio_jx670_companion.cpp
-index 6067600..bcdc244 100644
+index 6067600..00f71a4 100644
 --- a/src/boards/casio_jx670/casio_jx670_companion.cpp
 +++ b/src/boards/casio_jx670/casio_jx670_companion.cpp
 @@ -35,6 +35,7 @@ constexpr uint16_t kIntStatusAudio   = 0x100u;
@@ -28,7 +28,42 @@ index 6067600..bcdc244 100644
  }
  
  uint8_t CasioJx670Companion::ReadByte(uint32_t addr) {
-@@ -402,7 +405,7 @@ void CasioJx670Companion::UpdateIrqLine() {
+@@ -204,7 +207,11 @@ uint16_t CasioJx670Companion::ReadHalf(uint32_t addr) {
+     const uint32_t off = addr - kBase;
+     if (uint16_t v; display_.TryReadHalf(off, v)) return v;
+     if (uint16_t kv; keys_.TryReadHalf(off, kv)) return kv;
+-    if (off == kOffIntStatus0004) return IntStatus();
++    if (off == kOffIntStatus0004) {
++        const uint16_t st = IntStatus();
++        if (modem_->TakeLogBudget()) LOG(Periph, "[JX670-COM] companion rd 0x0004 (status) = 0x%04X\n", st);
++        return st;
++    }
+     /* mailbox cmd 0x8900 bit9 (0x200) = busy; cdm.dll sub_EE15EC @0xEE1624
+        busy-waits `while (*0x8900 & 0x200)`. Not-busy: command completes instantly
+        (no sub-CPU), matching ReadWord 0x8900 = 0. */
+@@ -273,7 +280,11 @@ uint32_t CasioJx670Companion::ReadWord(uint32_t addr) {
+         return sys_ctrl_[(0x0020u - kOffSysCtrlLo) / 4u].load(std::memory_order_acquire);
+     if (off == kOffIntMask0030 || off == kOffKeyChannel0014)
+         return sys_ctrl_[(off - kOffSysCtrlLo) / 4u].load(std::memory_order_acquire);
+-    if (off == kOffIntStatus0004) return IntStatus();
++    if (off == kOffIntStatus0004) {
++        const uint16_t st = IntStatus();
++        if (modem_->TakeLogBudget()) LOG(Periph, "[JX670-COM] companion rdw 0x0004 (status) = 0x%04X\n", st);
++        return st;
++    }
+     HaltUnsupportedAccess("EM-500 companion ReadWord", addr, 0);
+ }
+ 
+@@ -386,6 +397,8 @@ void CasioJx670Companion::WriteReg(uint32_t off, uint32_t value) {
+ 
+ bool CasioJx670Companion::WriteSysCtrl(uint32_t off, uint32_t value, uint32_t keep_mask) {
+     const uint32_t index = (off - kOffSysCtrlLo) / 4u;
++    if (modem_ && modem_->TakeLogBudget())
++        LOG(Periph, "[JX670-COM] companion sysctrl wr 0x%04X = 0x%08X\n", off, value);
+     if (!SetsOnly(value, kSysCtrlWritten[index])) return false;
+     std::atomic<uint32_t>& w = sys_ctrl_[index];
+     const uint32_t prev = w.load(std::memory_order_acquire);
+@@ -402,7 +415,7 @@ void CasioJx670Companion::UpdateIrqLine() {
      const uint32_t key_channel =
          sys_ctrl_[(kOffKeyChannel0014 - kOffSysCtrlLo) / 4u].load(std::memory_order_acquire);
      const bool keys = keys_.IrqPending() && (key_channel & kKeyChannelEnable) != 0u;
@@ -38,7 +73,7 @@ index 6067600..bcdc244 100644
  
  void CasioJx670Companion::WriteCodecCommand(uint32_t value) {
 diff --git a/src/boards/casio_jx670/casio_jx670_modem.cpp b/src/boards/casio_jx670/casio_jx670_modem.cpp
-index fbfb959..c9ebbb6 100644
+index fbfb959..260f21f 100644
 --- a/src/boards/casio_jx670/casio_jx670_modem.cpp
 +++ b/src/boards/casio_jx670/casio_jx670_modem.cpp
 @@ -43,6 +43,8 @@ void CasioJx670Modem::OnReady() {
@@ -57,7 +92,7 @@ index fbfb959..c9ebbb6 100644
 -    if (In16550(off)) { out = uart_->ReadReg8((off - k16550Base) / 4u); return true; }
 +    if (In16550(off)) {
 +        out = uart_->ReadReg8((off - k16550Base) / 4u);
-+        if (reg_log_budget_ > 0) { --reg_log_budget_; LOG(Periph, "[JX670-COM] rd reg%u = 0x%02X\n", (off - k16550Base) / 4u, out); }
++        if (TakeLogBudget()) { LOG(Periph, "[JX670-COM] rd reg%u = 0x%02X\n", (off - k16550Base) / 4u, out); }
 +        return true;
 +    }
      if (off == kOffCtrl8600) { out = ctrl_8600_; return true; }
@@ -67,14 +102,14 @@ index fbfb959..c9ebbb6 100644
  bool CasioJx670Modem::TryWriteByte(uint32_t off, uint8_t value) {
 -    if (In16550(off)) { uart_->WriteReg8((off - k16550Base) / 4u, value); return true; }
 +    if (In16550(off)) {
-+        if (reg_log_budget_ > 0) { --reg_log_budget_; LOG(Periph, "[JX670-COM] wr reg%u = 0x%02X\n", (off - k16550Base) / 4u, value); }
++        if (TakeLogBudget()) { LOG(Periph, "[JX670-COM] wr reg%u = 0x%02X\n", (off - k16550Base) / 4u, value); }
 +        uart_->WriteReg8((off - k16550Base) / 4u, value);
 +        return true;
 +    }
      if (off == kOffCtrl8600 && SetsOnly(value, kCtrl8600Written)) { ctrl_8600_ = value; return true; }
      return false;
  }
-@@ -94,11 +104,12 @@ bool CasioJx670Modem::TryWriteWord(uint32_t off, uint32_t value) {
+@@ -94,11 +104,13 @@ bool CasioJx670Modem::TryWriteWord(uint32_t off, uint32_t value) {
  }
  
  void CasioJx670Modem::OnUartIrq(bool asserted) {
@@ -86,13 +121,14 @@ index fbfb959..c9ebbb6 100644
 +       li $a0,0x13 (SYSINTR 19). The companion folds this level into its status register and
 +       GIU pin 0 (CasioJx670Companion::UpdateIrqLine). */
 +    LOG(Periph, "[JX670-COM] INTR %s\n", asserted ? "asserted" : "cleared");
++    if (asserted) reg_log_budget_.store(800);
 +    irq_.store(asserted, std::memory_order_release);
 +    if (on_irq_) on_irq_();
  }
  
  void CasioJx670Modem::SaveState(StateWriter& w) const {
 diff --git a/src/boards/casio_jx670/casio_jx670_modem.h b/src/boards/casio_jx670/casio_jx670_modem.h
-index 2dea4b2..3d4c0ef 100644
+index 2dea4b2..70e7848 100644
 --- a/src/boards/casio_jx670/casio_jx670_modem.h
 +++ b/src/boards/casio_jx670/casio_jx670_modem.h
 @@ -4,7 +4,9 @@
@@ -105,19 +141,21 @@ index 2dea4b2..3d4c0ef 100644
  #include <memory>
  
  namespace cerfcore {
-@@ -30,6 +32,11 @@ public:
+@@ -30,6 +32,13 @@ public:
      void RestoreState(StateReader& r);
      void PostRestore();
  
 +    /* Level of the 16550's INTR pin; the companion ORs it into its interrupt status (0x0004 bit4)
 +       and the GIU pin 0 line. */
 +    bool IrqPending() const { return irq_.load(std::memory_order_acquire); }
++    /* Debug log budget: refilled when INTR asserts so the guest's reaction is captured. */
++    bool TakeLogBudget() { return reg_log_budget_.fetch_sub(1) > 0; }
 +    void SetIrqCallback(std::function<void()> fn) { on_irq_ = std::move(fn); }
 +
  private:
      void OnUartIrq(bool asserted);
  
-@@ -41,6 +48,9 @@ private:
+@@ -41,6 +50,9 @@ private:
  
      SerialDeviceClockTimer       line_timer_{emu_, [this] { uart_->Port().OnTimer(); }};
      std::unique_ptr<Serial16550> uart_;
