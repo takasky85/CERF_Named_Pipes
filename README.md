@@ -95,3 +95,7 @@ The ROMs list "COM1 serial cable" (`Drivers\BuiltIn\Serial`, `Serial.dll`). `Ser
 `CasioJx670Modem`), not the VR4122 SIU (the SIU is probably the IrDA/SIR port). The patch now attaches that 16550 to a serial socket ("COM1")
 and models its interrupt: INTR -> companion status 0x0004 bit4 -> GIU pin 0 -> SYSINTR 19 (previously CERF aborted with "not yet modeled").
 The bit4 mask and exact cascade are inferred from earlier reverse-engineering comments in the source and are untested.
+
+Update: the first interrupt model held the line high until the 16550 was serviced; the E-700 kernel then spun reading companion status 0x0004
+forever (seen in a dev-mode log). The interrupt is now latched once per INTR rising edge and acknowledged by the guest's status read (and
+re-latched when the guest writes the 16550 IER while INTR is still high). Still unverified.

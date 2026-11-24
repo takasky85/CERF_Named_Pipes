@@ -1,5 +1,5 @@
 diff --git a/src/boards/casio_jx670/casio_jx670_companion.cpp b/src/boards/casio_jx670/casio_jx670_companion.cpp
-index 6067600..00f71a4 100644
+index 6067600..b0b4348 100644
 --- a/src/boards/casio_jx670/casio_jx670_companion.cpp
 +++ b/src/boards/casio_jx670/casio_jx670_companion.cpp
 @@ -35,6 +35,7 @@ constexpr uint16_t kIntStatusAudio   = 0x100u;
@@ -28,7 +28,7 @@ index 6067600..00f71a4 100644
  }
  
  uint8_t CasioJx670Companion::ReadByte(uint32_t addr) {
-@@ -204,7 +207,11 @@ uint16_t CasioJx670Companion::ReadHalf(uint32_t addr) {
+@@ -204,7 +207,12 @@ uint16_t CasioJx670Companion::ReadHalf(uint32_t addr) {
      const uint32_t off = addr - kBase;
      if (uint16_t v; display_.TryReadHalf(off, v)) return v;
      if (uint16_t kv; keys_.TryReadHalf(off, kv)) return kv;
@@ -36,12 +36,13 @@ index 6067600..00f71a4 100644
 +    if (off == kOffIntStatus0004) {
 +        const uint16_t st = IntStatus();
 +        if (modem_->TakeLogBudget()) LOG(Periph, "[JX670-COM] companion rd 0x0004 (status) = 0x%04X\n", st);
++        if (st & kIntStatusModem) modem_->AckIrq();
 +        return st;
 +    }
      /* mailbox cmd 0x8900 bit9 (0x200) = busy; cdm.dll sub_EE15EC @0xEE1624
         busy-waits `while (*0x8900 & 0x200)`. Not-busy: command completes instantly
         (no sub-CPU), matching ReadWord 0x8900 = 0. */
-@@ -273,7 +280,11 @@ uint32_t CasioJx670Companion::ReadWord(uint32_t addr) {
+@@ -273,7 +281,12 @@ uint32_t CasioJx670Companion::ReadWord(uint32_t addr) {
          return sys_ctrl_[(0x0020u - kOffSysCtrlLo) / 4u].load(std::memory_order_acquire);
      if (off == kOffIntMask0030 || off == kOffKeyChannel0014)
          return sys_ctrl_[(off - kOffSysCtrlLo) / 4u].load(std::memory_order_acquire);
@@ -49,12 +50,13 @@ index 6067600..00f71a4 100644
 +    if (off == kOffIntStatus0004) {
 +        const uint16_t st = IntStatus();
 +        if (modem_->TakeLogBudget()) LOG(Periph, "[JX670-COM] companion rdw 0x0004 (status) = 0x%04X\n", st);
++        if (st & kIntStatusModem) modem_->AckIrq();
 +        return st;
 +    }
      HaltUnsupportedAccess("EM-500 companion ReadWord", addr, 0);
  }
  
-@@ -386,6 +397,8 @@ void CasioJx670Companion::WriteReg(uint32_t off, uint32_t value) {
+@@ -386,6 +399,8 @@ void CasioJx670Companion::WriteReg(uint32_t off, uint32_t value) {
  
  bool CasioJx670Companion::WriteSysCtrl(uint32_t off, uint32_t value, uint32_t keep_mask) {
      const uint32_t index = (off - kOffSysCtrlLo) / 4u;
@@ -63,7 +65,7 @@ index 6067600..00f71a4 100644
      if (!SetsOnly(value, kSysCtrlWritten[index])) return false;
      std::atomic<uint32_t>& w = sys_ctrl_[index];
      const uint32_t prev = w.load(std::memory_order_acquire);
-@@ -402,7 +415,7 @@ void CasioJx670Companion::UpdateIrqLine() {
+@@ -402,7 +417,7 @@ void CasioJx670Companion::UpdateIrqLine() {
      const uint32_t key_channel =
          sys_ctrl_[(kOffKeyChannel0014 - kOffSysCtrlLo) / 4u].load(std::memory_order_acquire);
      const bool keys = keys_.IrqPending() && (key_channel & kKeyChannelEnable) != 0u;
@@ -73,7 +75,7 @@ index 6067600..00f71a4 100644
  
  void CasioJx670Companion::WriteCodecCommand(uint32_t value) {
 diff --git a/src/boards/casio_jx670/casio_jx670_modem.cpp b/src/boards/casio_jx670/casio_jx670_modem.cpp
-index fbfb959..260f21f 100644
+index fbfb959..fd4d848 100644
 --- a/src/boards/casio_jx670/casio_jx670_modem.cpp
 +++ b/src/boards/casio_jx670/casio_jx670_modem.cpp
 @@ -43,6 +43,8 @@ void CasioJx670Modem::OnReady() {
@@ -85,7 +87,7 @@ index fbfb959..260f21f 100644
      emu_.Get<GuestCpuReset>().RegisterResetListener([this](ResetLineKind kind) {
          ctrl_8600_   = 0;
          socket_a1c0_ = 0;
-@@ -52,13 +54,21 @@ void CasioJx670Modem::OnReady() {
+@@ -52,13 +54,22 @@ void CasioJx670Modem::OnReady() {
  }
  
  bool CasioJx670Modem::TryReadByte(uint32_t off, uint8_t& out) {
@@ -104,12 +106,21 @@ index fbfb959..260f21f 100644
 +    if (In16550(off)) {
 +        if (TakeLogBudget()) { LOG(Periph, "[JX670-COM] wr reg%u = 0x%02X\n", (off - k16550Base) / 4u, value); }
 +        uart_->WriteReg8((off - k16550Base) / 4u, value);
++        if ((off - k16550Base) / 4u == 1u) OnIerWritten();
 +        return true;
 +    }
      if (off == kOffCtrl8600 && SetsOnly(value, kCtrl8600Written)) { ctrl_8600_ = value; return true; }
      return false;
  }
-@@ -94,11 +104,13 @@ bool CasioJx670Modem::TryWriteWord(uint32_t off, uint32_t value) {
+@@ -84,6 +95,7 @@ bool CasioJx670Modem::TryReadWord(uint32_t off, uint32_t& out) {
+ bool CasioJx670Modem::TryWriteWord(uint32_t off, uint32_t value) {
+     if (off == kOffIer8684) {
+         uart_->WriteReg8((kOffIer8684 - k16550Base) / 4u, static_cast<uint8_t>(value));
++        OnIerWritten();
+         return true;
+     }
+     if (off == kOffSocketA1C0 && SetsOnly(value, kSocketA1C0Written)) {
+@@ -94,11 +106,21 @@ bool CasioJx670Modem::TryWriteWord(uint32_t off, uint32_t value) {
  }
  
  void CasioJx670Modem::OnUartIrq(bool asserted) {
@@ -118,17 +129,25 @@ index fbfb959..260f21f 100644
 -       li $a0,0x13 (SYSINTR 19). */
 -    emu_.Get<Fatal>().Die("EM-500 companion modem 16550 asserted INTR: companion->GIU "
 -                          "cascade (0x0004 bit4 -> SYSINTR 19) not yet modeled");
-+       li $a0,0x13 (SYSINTR 19). The companion folds this level into its status register and
-+       GIU pin 0 (CasioJx670Companion::UpdateIrqLine). */
++       li $a0,0x13 (SYSINTR 19). A rising INTR latches one pending event (status bit4 + GIU pin 0)
++       that the guest's status read acknowledges; see AckIrq. */
 +    LOG(Periph, "[JX670-COM] INTR %s\n", asserted ? "asserted" : "cleared");
 +    if (asserted) reg_log_budget_.store(800);
-+    irq_.store(asserted, std::memory_order_release);
++    const bool was = irq_.exchange(asserted, std::memory_order_acq_rel);
++    if (asserted && !was) latched_.store(true, std::memory_order_release);
++    if (!asserted) latched_.store(false, std::memory_order_release);
 +    if (on_irq_) on_irq_();
++}
++
++/* The driver re-enables the interrupt (IER write, e.g. nk OEMInterruptEnable |= 8 / InterruptDone) while
++   the 16550 still has INTR high: raise another event so it is not lost. */
++void CasioJx670Modem::OnIerWritten() {
++    if (irq_.load(std::memory_order_acquire) && !latched_.exchange(true) && on_irq_) on_irq_();
  }
  
  void CasioJx670Modem::SaveState(StateWriter& w) const {
 diff --git a/src/boards/casio_jx670/casio_jx670_modem.h b/src/boards/casio_jx670/casio_jx670_modem.h
-index 2dea4b2..70e7848 100644
+index 2dea4b2..4134657 100644
 --- a/src/boards/casio_jx670/casio_jx670_modem.h
 +++ b/src/boards/casio_jx670/casio_jx670_modem.h
 @@ -4,7 +4,9 @@
@@ -141,26 +160,35 @@ index 2dea4b2..70e7848 100644
  #include <memory>
  
  namespace cerfcore {
-@@ -30,6 +32,13 @@ public:
+@@ -30,8 +32,21 @@ public:
      void RestoreState(StateReader& r);
      void PostRestore();
  
 +    /* Level of the 16550's INTR pin; the companion ORs it into its interrupt status (0x0004 bit4)
 +       and the GIU pin 0 line. */
-+    bool IrqPending() const { return irq_.load(std::memory_order_acquire); }
++    bool IrqPending() const { return latched_.load(std::memory_order_acquire); }
++    /* The companion reports the interrupt once per event: the guest's status read acknowledges it
++       (the level on a silent kernel ISR loop never drops otherwise). */
++    void AckIrq() {
++        if (latched_.exchange(false) && on_irq_) on_irq_();
++    }
 +    /* Debug log budget: refilled when INTR asserts so the guest's reaction is captured. */
 +    bool TakeLogBudget() { return reg_log_budget_.fetch_sub(1) > 0; }
 +    void SetIrqCallback(std::function<void()> fn) { on_irq_ = std::move(fn); }
 +
  private:
      void OnUartIrq(bool asserted);
++    void OnIerWritten();
  
-@@ -41,6 +50,9 @@ private:
+     static constexpr uint32_t k16550Base = 0x8680u;   /* regs 0..7 stride 4 (serial.dll dword_F58130 [1..8]) */
+     bool In16550(uint32_t off) const {
+@@ -41,6 +56,10 @@ private:
  
      SerialDeviceClockTimer       line_timer_{emu_, [this] { uart_->Port().OnTimer(); }};
      std::unique_ptr<Serial16550> uart_;
 +    std::atomic<int>      reg_log_budget_{400};  /* first register accesses are logged */
-+    std::atomic<bool>     irq_{false};
++    std::atomic<bool>     irq_{false};      /* 16550 INTR level */
++    std::atomic<bool>     latched_{false};  /* pending event as the companion status shows it */
 +    std::function<void()> on_irq_;
      uint8_t  ctrl_8600_   = 0;   /* serial.dll dword_F58130[0]=0x600 -> companion 0x8600 */
      uint16_t socket_a1c0_ = 0;
